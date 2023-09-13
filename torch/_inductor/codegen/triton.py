@@ -2607,7 +2607,6 @@ class TritonScheduling(BaseScheduling):
 
         # finalize must be called after adding epilogue above
         with V.set_kernel_handler(kernel):
-            # TODO: Maybe unify CUDATemplateKernel to also use PartialRender for flexible epilogue fusion.
             src_code = (
                 partial_code
                 if isinstance(partial_code, str)

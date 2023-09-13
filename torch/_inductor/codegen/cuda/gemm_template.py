@@ -5,11 +5,13 @@ from typing import Dict, List, Optional, Tuple
 
 from ...config import cuda as inductor_cuda_config
 from ...ir import Buffer, FixedLayout, IRNode, Layout
+from ...scheduler import BaseSchedulerNode, SchedulerNode
 from ..common import IndentedBuffer
 
 from . import cutlass_utils
 from .cuda_kernel import CUDATemplateKernel
 from .cuda_template import CUTLASSTemplate
+from .cutlass_epilogue_gen import CutlassEVTEpilogueTypeFormatter
 
 log = logging.getLogger(__name__)
 
@@ -161,10 +163,12 @@ class CUTLASSGemmTemplate(CUTLASSTemplate):
         alpha: float,
         beta: float,
         input_reorder: Optional[List[int]] = None,
+        can_fuse_epilogue: bool = False,
     ):
         super().__init__("cutlass_gemm", input_nodes, layout, input_reorder)
         self.alpha = alpha
         self.beta = beta
+        self.can_fuse_epilogue = can_fuse_epilogue
 
     def header(self) -> IndentedBuffer:
         res = super().header()
@@ -229,15 +233,55 @@ class CUTLASSGemmTemplate(CUTLASSTemplate):
         return result
 
     @staticmethod
+    def supports_evt(op: "cutlass_gemm_op.GemmOperation") -> bool:  # type: ignore[name-defined]
+        """
+        returns True if the op is capable of flexible epilogue fusions
+        using epilogue visitor trees.
+
+        See https://github.com/NVIDIA/cutlass/blob/e01b9b5029b7caca5a43c29f7d2714d7cf1dcae8/examples/49_hopper_gemm_with_collective_builder/49_collective_builder.cu#L283-L285 # noqa: B950
+        """
+        assert cutlass_utils.try_import_cutlass()
+        import cutlass_library as cutlass_lib  # type: ignore[import]
+
+        if op.gemm_kind not in {
+            cutlass_lib.GemmKind.Universal3x,
+        }:
+            return False
+        if op.epilogue_schedule not in (
+            cutlass_lib.EpilogueScheduleType.ScheduleAuto,
+            cutlass_lib.EpilogueScheduleType.TmaWarpSpecialized,
+            cutlass_lib.EpilogueScheduleType.TmaWarpSpecializedCooperative,
+        ):
+            return False
+
+        return True
+
+    def render_evt_epilogue_declaration(
+        self,
+        template_output_node_name: str,
+        evt_type_name: str,
+        epilogue_nodes: List[BaseSchedulerNode],
+    ):
+        """Generates the epilogue for the EVT epilogue fusion"""
+        return CutlassEVTEpilogueTypeFormatter.ir_to_evt_string(
+            template_output_node_name, evt_type_name, epilogue_nodes
+        )
+
+    @staticmethod
     def define_gemm_instance(
         op: "cutlass_gemm_op.GemmOperation",  # type: ignore[name-defined]
+        epilogue_nodes: Optional[List[BaseSchedulerNode]] = None,
     ) -> Tuple[str, str]:
         assert cutlass_utils.try_import_cutlass()
         import cutlass_gemm_operation as cutlass_gemm_op  # type: ignore[import]
         import cutlass_library as cutlass_lib  # type: ignore[import]
 
+        from torch._inductor.codegen.cuda.cutlass_lib_extensions.gemm_operation_extensions import (
+            EmitGemmUniversal3xInstanceWithEVT,
+        )
+
         if op.gemm_kind == cutlass_lib.GemmKind.Universal3x:
-            emitter = cutlass_gemm_op.EmitGemmUniversal3xInstance()
+            emitter = EmitGemmUniversal3xInstanceWithEVT()
             op_def = emitter.emit(op)
             pattern = re.compile(r"\s*struct\s(.*?)\s:")
             decl = [line for line in op_def.split("\n") if "struct " in line][-1]
@@ -306,7 +350,6 @@ class CUTLASSGemmTemplate(CUTLASSTemplate):
             cutlass_lib.GemmKind.Universal3x,
         }:
             return None
-
         # Filter ops by dtypes.
         X = self.input_nodes[0]
         W = self.input_nodes[1]
@@ -381,6 +424,14 @@ class CUTLASSGemmTemplate(CUTLASSTemplate):
         num_2x_ops = 0
         for op_list in ops.values():
             for op in op_list:
+                supports_evt = self.supports_evt(op)
+                if self.can_fuse_epilogue != supports_evt:
+                    continue
+                if (
+                    inductor_cuda_config.cutlass_only_evt_capable_ops
+                    and not supports_evt
+                ):
+                    continue
                 filter_res = self.filter_op(op)
                 if (
                     filter_res is not None
@@ -479,12 +530,18 @@ class CUTLASSGemmTemplate(CUTLASSTemplate):
         kernel: CUDATemplateKernel,
         op: "cutlass_gemm_op.GemmOperation",  # type: ignore[name-defined]
         output_node: IRNode = None,
+        epilogue_nodes: Optional[List[SchedulerNode]] = None,
     ) -> str:
+        if epilogue_nodes is not None and len(epilogue_nodes) > 1:
+            assert self.can_fuse_epilogue and CUTLASSGemmTemplate.supports_evt(
+                op
+            ), "op does not support EVT epilogue fusion"
         assert cutlass_utils.try_import_cutlass()
         import cutlass_library as cutlass_lib  # type: ignore[import]
 
         if output_node is not None:
             self.output_node = output_node
+
         assert len(self.input_nodes) >= 2 and self.output_node is not None
         X, W = self.input_nodes[0], self.input_nodes[1]
         Y = self.output_node
@@ -506,7 +563,9 @@ class CUTLASSGemmTemplate(CUTLASSTemplate):
             # TODO: Support split_k.
             argument_template = GEMM_ARGS_CUTLASS_2X
 
-        instance_definition, instance_type = self.define_gemm_instance(op)
+        instance_definition, instance_type = self.define_gemm_instance(
+            op, epilogue_nodes
+        )
         options = dict(
             alpha=self.alpha,
             beta=self.beta,
