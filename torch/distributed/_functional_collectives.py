@@ -456,6 +456,7 @@ def _expand_group(group: RANK_TYPES, tag: str = "") -> Tuple[str, List[int], int
     return (tag, rankset, group_size)
 
 def _are_we_tracing() -> bool:
+    return True  # HACK: re-try without
     if is_torchdynamo_compiling():
         return True
     mode = get_innermost_proxy_mode()

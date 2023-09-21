@@ -162,7 +162,10 @@ def redistribute_local_tensor(
                 # For replicate -> partial, we zero out all other ranks of the current mesh dim
                 # and leave only 1 rank have the data, to perform a "zero cost" reshard.
                 if my_coordinate[i] != 0:
-                    new_local_tensor = local_tensor.zero_()
+                    # This can cause an input mutation if local_tensor is a graph input.
+                    # This blows up in AOTAutograd, but we should revisit why
+                    # new_local_tensor = local_tensor.zero_()
+                    new_local_tensor = torch.zeros_like(local_tensor)
                 else:
                     new_local_tensor = local_tensor
             else:

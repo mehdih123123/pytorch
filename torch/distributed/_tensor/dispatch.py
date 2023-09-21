@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed._tensor.api as dtensor
 import torch.distributed._tensor.random as random
+from torch._subclasses.fake_tensor import unset_fake_temporarily
 from torch.distributed._tensor.device_mesh import DeviceMesh
 from torch.distributed._tensor.op_schema import (
     _is_inplace_op,
@@ -21,6 +22,7 @@ from torch.distributed._tensor.placement_types import DTensorSpec
 from torch.distributed._tensor.random import is_rng_supported_mesh
 from torch.distributed._tensor.redistribute import redistribute_local_tensor
 from torch.distributed._tensor.sharding_prop import ShardingPropagator
+from torch.fx.experimental.proxy_tensor import disable_proxy_modes_tracing
 from torch.utils._pytree import tree_flatten, tree_unflatten
 
 
@@ -132,10 +134,11 @@ def _operator_dispatch(
             flat_args_schema.append(arg._spec)
             flat_local_args.append(arg._local_tensor)
             if mesh is not None:
-                if mesh != arg.device_mesh:
-                    raise NotImplementedError(
-                        f"{op_call}: DTensor does not support cross-mesh operation yet!"
-                    )
+                with disable_proxy_modes_tracing(), unset_fake_temporarily():
+                    if mesh != arg.device_mesh:
+                        raise NotImplementedError(
+                            f"{op_call}: DTensor does not support cross-mesh operation yet!"
+                        )
             else:
                 mesh = arg.device_mesh
         elif isinstance(arg, torch.Tensor):
