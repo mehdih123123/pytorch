@@ -16,11 +16,28 @@ class TwoTensor(torch.Tensor):
         # I guess it would be more accurate to represent the shape as torch.cat(a, b).shape
         shape = a.shape
         kwargs = {}
+        kwargs["strides"] = a.stride()
+        kwargs["storage_offset"] = a.storage_offset()
         kwargs["device"] = a.device
         kwargs["layout"] = a.layout
         kwargs["requires_grad"] = a.requires_grad
         kwargs["dtype"] = a.dtype
-        return torch.Tensor._make_wrapper_subclass(cls, shape, **kwargs)
+        out = torch.Tensor._make_wrapper_subclass(cls, shape, **kwargs)
+
+        # If a and b are non-contiguous (or have weird storage offsets, etc)
+        # Then we want to set the metadata on our wrapper properly too.
+        assert a.shape == b.shape
+        assert a.stride() == b.stride()
+        assert a.storage_offset() == b.storage_offset()
+        if (
+            out.shape != a.shape
+            or out.stride() != a.stride()
+            or out.storage_offset() != a.storage_offset()
+        ):
+            with torch.utils._mode_utils.no_dispatch():
+                import pdb; pdb.set_trace()
+                out.as_strided_(a.shape, a.stride(), a.storage_offset())
+        return out
 
     def __init__(self, a, b):
         self.a = a
