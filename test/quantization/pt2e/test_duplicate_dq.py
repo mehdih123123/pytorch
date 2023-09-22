@@ -9,7 +9,6 @@ from torch.ao.quantization.observer import (
     MinMaxObserver,
     PlaceholderObserver,
 )
-from torch.ao.quantization.pt2e.utils import _find_q_dq_node_for_user
 from torch.ao.quantization.quantize_pt2e import convert_pt2e, prepare_pt2e
 from torch.ao.quantization.quantizer import (
     QuantizationAnnotation,
@@ -81,6 +80,13 @@ class TestHelperModules:
             return w, add_output, extra_output
 
 
+_DEQUANTIZE_OPS = [
+    torch.ops.quantized_decomposed.dequantize_per_tensor.default,
+    torch.ops.quantized_decomposed.dequantize_per_tensor.tensor,
+    torch.ops.quantized_decomposed.dequantize_per_channel.default,
+]
+
+
 class TestDuplicateDQPass(QuantizationTestCase):
     def _test_duplicate_dq(
         self,
@@ -106,19 +112,9 @@ class TestDuplicateDQPass(QuantizationTestCase):
         for n in m.graph.nodes:
             annotation = n.meta.get("quantization_annotation", None)
             if annotation is not None:
-                input_qspec_map = annotation.input_qspec_map
-                for input_node, qspec in input_qspec_map.items():
-                    if (
-                        qspec is not None
-                        and hasattr(qspec, "dtype")
-                        and qspec.dtype != torch.float
-                    ):
-                        q_node, dq_node = _find_q_dq_node_for_user(input_node, n)
-                        if dq_node is None:
-                            raise ValueError(
-                                f"No dq node found for {n}, even though {n} annotated for quantization."
-                            )
-                        self.assertEqual(len(dq_node.users.keys()), 1)
+                for arg in n.args:
+                    if isinstance(arg, torch.fx.Node) and arg.target in _DEQUANTIZE_OPS:
+                        self.assertEqual(len(arg.users.keys()), 1)
 
     def test_no_need_for_duplicate_dq(self):
         """
