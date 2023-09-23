@@ -23,7 +23,8 @@ Tensor cat_batch(const MaterializedITensorListRef& tensors, vTensor& v_output) {
   uvec3 dst_offset{};
 
   for (const at::Tensor& tensor : tensors) {
-    const vTensor& v_self = convert(tensor);
+    const Tensor self = tensor.is_vulkan() ? tensor : tensor.vulkan();
+    const vTensor& v_self = convert(self);
 
     api::PipelineBarrier pipeline_barrier{};
 
@@ -204,7 +205,8 @@ Tensor cat_width(const MaterializedITensorListRef& tensors, vTensor& v_output) {
   uvec3 dst_offset{};
 
   for (const at::Tensor& tensor : tensors) {
-    const vTensor& v_self = convert(tensor);
+    const Tensor self = tensor.is_vulkan() ? tensor : tensor.vulkan();
+    const vTensor& v_self = convert(self);
 
     api::PipelineBarrier pipeline_barrier{};
 
@@ -240,7 +242,8 @@ Tensor cat_height(
   uvec3 dst_offset{};
 
   for (const at::Tensor& tensor : tensors) {
-    const vTensor& v_self = convert(tensor);
+    const Tensor self = tensor.is_vulkan() ? tensor : tensor.vulkan();
+    const vTensor& v_self = convert(self);
 
     api::PipelineBarrier pipeline_barrier{};
 
